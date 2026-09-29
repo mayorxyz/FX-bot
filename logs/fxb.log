@@ -1,0 +1,10 @@
+2026-09-29T07:50:52Z | WARNING | fxb.data.providers.csv_provider | CSV bars.csv has no spread column; filling 2.0 points (configure per-source if known)
+2026-09-29T07:50:52Z | WARNING | fxb.data.providers.csv_provider | CSV bars.csv has no spread column; filling 2.0 points (configure per-source if known)
+2026-09-29T07:50:52Z | INFO    | fxb.data.providers.mt5_provider | MT5 terminal initialized (server=<default>)
+2026-09-29T07:50:52Z | INFO    | fxb.data.providers.mt5_provider | MT5 terminal initialized (server=<default>)
+2026-09-29T07:50:52Z | INFO    | fxb.data.providers.mt5_provider | MT5 terminal initialized (server=<default>)
+2026-09-29T07:50:52Z | INFO    | fxb.data.providers.mt5_provider | MT5 terminal initialized (server=<default>)
+2026-09-29T07:50:53Z | WARNING | fxb.data.resample | resample 0 days 00:15:00->H1: incomplete HTF window starting 2024-06-10T08:00:00+00:00 (1 of 4 expected LTF bars missing); not emitted
+2026-09-29T07:50:53Z | WARNING | fxb.data.resample | resample 0 days 00:30:00->H1: incomplete HTF window starting 2024-06-10T08:00:00+00:00 (1 of 2 expected LTF bars missing); not emitted
+2026-09-29T07:50:53Z | WARNING | fxb.data.resample | resample 0 days 00:30:00->H1: incomplete HTF window starting 2024-06-10T08:00:00+00:00 (1 of 2 expected LTF bars missing); not emitted
+2026-09-29T07:50:53Z | WARNING | fxb.data.resample | resample 0 days 00:15:00->H4: incomplete HTF window starting 2024-06-10T08:00:00+00:00 (1 of 16 expected LTF bars missing); not emitted

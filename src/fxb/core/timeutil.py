@@ -7,27 +7,92 @@ Global conventions (non-negotiable):
   ``ts_open + timeframe_to_timedelta(tf)``. A bar is closed when
   ``now_utc >= ts_open + duration``.
 - Forex market-hours model (approximation, documented): the spot FX market is
-  open continuously from Sunday 22:00 UTC to Friday 22:00 UTC and closed in
-  between. Public holidays are NOT modeled.
+  CLOSED from Friday 17:00 America/New_York (inclusive) to Sunday 17:00
+  America/New_York (exclusive), and OPEN otherwise. New York DST is honored
+  via :mod:`zoneinfo`, so the UTC boundaries shift between winter (22:00Z)
+  and summer (21:00Z). Public holidays are NOT modeled.
 """
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import List
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 UTC = timezone.utc
 
-#: Weekly open (Sunday) and close (Friday) hour in UTC for the FX market.
-MARKET_OPEN_SUNDAY_UTC_HOUR = 22
-MARKET_CLOSE_FRIDAY_UTC_HOUR = 22
+#: IANA zone used for the weekly market-open/close wall-clock schedule.
+MARKET_TZ_NAME = "America/New_York"
+_MARKET_TZ = ZoneInfo(MARKET_TZ_NAME)
 
-_WEEK_SECONDS = 7 * 24 * 3600
-#: Epoch day 0 (1970-01-01) was a Thursday, so shift the weekly modulo by 4
-#: days to make it Monday-based; Friday 22:00 UTC is then the start of the
-#: weekly closed window.
-_CLOSED_START_SEC = (4 * 24 + MARKET_CLOSE_FRIDAY_UTC_HOUR) * 3600  # Mon-based Fri 22:00
+#: Weekly close (Friday) and reopen (Sunday) hour in NEW YORK wall-clock time.
+#: The market is closed on [Fri 17:00 NY, Sun 17:00 NY).
+MARKET_CLOSE_FRIDAY_NY_HOUR = 17
+MARKET_OPEN_SUNDAY_NY_HOUR = 17
+
+#: Back-compat aliases (deprecated): the schedule is now defined in New York
+#: wall-clock time, not fixed UTC hours. Kept so older imports keep working.
+MARKET_CLOSE_FRIDAY_UTC_HOUR = MARKET_CLOSE_FRIDAY_NY_HOUR
+MARKET_OPEN_SUNDAY_UTC_HOUR = MARKET_OPEN_SUNDAY_NY_HOUR
+
+
+def _to_utc(ny_ts: pd.Timestamp) -> pd.Timestamp:
+    """Convert a New-York wall-clock Timestamp to UTC (DST-correct)."""
+    aware = ny_ts.tz_localize(
+        _MARKET_TZ, nonexistent="shift_forward", ambiguous=False
+    )
+    return aware.tz_convert("UTC")
+
+
+def _week_closed_window(ref: pd.Timestamp) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """The weekly closed window [c0, c1) of ``ref``'s NY trading week (UTC pair).
+
+    Windows run Friday 17:00 -> Sunday 17:00 *New York wall-clock time*;
+    converting those instants to UTC honors DST automatically (winter
+    closure = Fri 22:00Z .. Sun 22:00Z; summer = Fri 21:00Z .. Sun 21:00Z).
+
+    The anchor is the most recent Friday **in New York local date terms** at
+    or before ``ref``, EXCEPT for early-Sunday UTC instants that are still
+    Saturday in New York (e.g. winter Sun 00:30Z = Sat 19:30 NY): there the
+    PREVIOUS Friday's window is returned because it is the closure still in
+    effect at that instant. :func:`closed_windows_around` additionally probes
+    adjacent weeks so every containment/overlap case is covered.
+    """
+    ts = ensure_utc(ref)
+    local = ts.tz_convert(_MARKET_TZ)
+    days_since_fri = (local.dayofweek - 4) % 7   # Mon..Sun -> 4,5,6,0,1,2,3
+    fri = local.normalize() - pd.Timedelta(days=int(days_since_fri))
+    if days_since_fri == 2 and ts.weekday() == 6:
+        # NY says Saturday but UTC already flipped to Sunday: we are inside
+        # the closure that started on the PREVIOUS Friday.
+        fri = fri - pd.Timedelta(days=7)
+    c0 = _to_utc(fri.replace(hour=MARKET_CLOSE_FRIDAY_NY_HOUR))
+    c1 = _to_utc((fri + pd.Timedelta(days=2)).replace(hour=MARKET_OPEN_SUNDAY_NY_HOUR))
+    return c0, c1
+
+
+def closed_windows_around(ref: pd.Timestamp) -> List[tuple[pd.Timestamp, pd.Timestamp]]:
+    """Candidate weekly closed windows that could contain/intersect ``ref``.
+
+    Returns up to three distinct [Fri 17:00 NY, Sun 17:00 NY) windows as UTC
+    ``(c0, c1)`` pairs: the window of ``ref``'s NY trading week plus the
+    windows found by probing one week earlier and one week later. This
+    covers every boundary case: Friday evening, Saturday, and Sunday morning
+    before the reopen under either UTC-day alignment (e.g. winter Sun 00:30Z
+    belongs to the *previous* local week's window while Sun 23:00Z reopens
+    the new one).
+    """
+    ts = ensure_utc(ref)
+    out: List[tuple[pd.Timestamp, pd.Timestamp]] = []
+    seen: set[tuple[float, float]] = set()
+    for shift_days in (0, -7, 7):
+        c0, c1 = _week_closed_window(ts - pd.Timedelta(days=int(shift_days)))
+        key = (float(c0.timestamp()), float(c1.timestamp()))
+        if key not in seen:
+            seen.add(key)
+            out.append((c0, c1))
+    return out
 
 
 class NaiveDatetimeError(ValueError):
@@ -73,13 +138,17 @@ def bar_close_time(tf: str, ts_open: datetime | pd.Timestamp) -> pd.Timestamp:
 def is_forex_market_open(dt: datetime | pd.Timestamp) -> bool:
     """True if the (approximated) spot FX market is open at instant ``dt``.
 
-    Closed from Friday 22:00 UTC (inclusive) to Sunday 22:00 UTC (exclusive).
-    This is a pure clock approximation: holidays and half-days are ignored.
+    CLOSED from Friday 17:00 America/New_York (inclusive) to Sunday 17:00
+    America/New_York (exclusive); OPEN otherwise. Pure clock approximation:
+    holidays and half-days are ignored. Because the schedule is evaluated in
+    New York wall-clock time, the UTC boundary shifts with DST (22:00 UTC in
+    winter, 21:00 UTC in summer).
     """
     ts = ensure_utc(dt)
-    # Monday-based week position (epoch day 0 was a Thursday -> +4 days shift).
-    sec_in_week = ((int(ts.timestamp()) + 4 * 86_400) % _WEEK_SECONDS)
-    return sec_in_week < _CLOSED_START_SEC
+    for c0, c1 in closed_windows_around(ts):
+        if c0 <= ts < c1:
+            return False
+    return True
 
 
 def expected_bar_times(tf: str, start: datetime | pd.Timestamp,
@@ -89,8 +158,8 @@ def expected_bar_times(tf: str, start: datetime | pd.Timestamp,
     - Grid anchored at the Unix epoch (exact minute multiples), which aligns
       with midnight UTC for all supported timeframes.
     - Bars whose full lifetime would touch the weekend-closed period
-      (Friday 22:00 UTC .. Sunday 22:00 UTC) are excluded, so gap detection
-      never flags the weekend.
+      (Friday 17:00 .. Sunday 17:00 America/New_York) are excluded, so gap
+      detection never flags the weekend.
     - Only bars already CLOSED at ``end`` are expected (``close <= end``).
     """
     start_ts = ensure_utc(start)
@@ -107,7 +176,7 @@ def expected_bar_times(tf: str, start: datetime | pd.Timestamp,
     while t + step_s <= int(end_ts.timestamp()):
         open_ts = pd.Timestamp(t, unit="s", tz="UTC")
         close_ts = open_ts + dur
-        # exclude bars touching the weekly closed window [Fri 22:00, Sun 22:00)
+        # exclude bars touching the weekly closed window [Fri 17:00 NY, Sun 17:00 NY)
         if not (_touches_closed_window(open_ts, close_ts)):
             out.append(open_ts)
         t += step_s
@@ -115,20 +184,76 @@ def expected_bar_times(tf: str, start: datetime | pd.Timestamp,
 
 
 def _touches_closed_window(open_ts: pd.Timestamp, close_ts: pd.Timestamp) -> bool:
-    """True if [open, close] overlaps a weekly closed window.
+    """True if the bar lifetime [open, close] overlaps any weekly closed window.
 
-    The closed window runs Friday 22:00 UTC (inclusive) to Sunday 22:00 UTC
-    (exclusive). Both the window of the week containing ``open_ts`` and the
-    previous week's window are checked so that early-Sunday bars are handled.
+    A bar is excluded when it would trade into the closed period
+    [Fri 17:00 NY, Sun 17:00 NY). Windows for the bar's local week and the
+    previous/next weeks are checked so early-Sunday bars (whose UTC date can
+    fall in either NY week) are handled correctly.
     """
-    day = open_ts.normalize()
-    # most recent Friday on-or-before the bar's opening date
-    fri = day - pd.Timedelta(days=(open_ts.weekday() - 4) % 7)
-    fri_close = fri + pd.Timedelta(hours=MARKET_CLOSE_FRIDAY_UTC_HOUR)
-    sun_open = fri_close + pd.Timedelta(days=2)
-    for shift_days in (-7, 0):
-        c0 = fri_close + pd.Timedelta(days=shift_days)
-        c1 = sun_open + pd.Timedelta(days=shift_days)
+    for c0, c1 in closed_windows_around(open_ts):
         if open_ts < c1 and close_ts > c0:
             return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# Compatibility helpers used by core.frames / signals / backtest modules.
+# Thin aliases over the canonical functions above; kept here so those modules
+# never re-implement the market-hours or timezone logic.
+# ---------------------------------------------------------------------------
+
+#: Alias of :func:`is_forex_market_open` (canonical name for older callers).
+is_market_open = is_forex_market_open
+
+
+def to_utc(dt: datetime | pd.Timestamp) -> pd.Timestamp:
+    """Alias of :func:`ensure_utc`."""
+    return ensure_utc(dt)
+
+
+def tf_to_timedelta(tf: str) -> pd.Timedelta:
+    """Return :func:`timeframe_to_timedelta` as a ``pandas.Timedelta``."""
+    return pd.Timedelta(timeframe_to_timedelta(tf))
+
+
+def tf_minutes(tf: str) -> int:
+    """Timeframe duration in whole minutes."""
+    return int(timeframe_to_timedelta(tf).total_seconds() // 60)
+
+
+def crosses_weekend(start: datetime | pd.Timestamp, end: datetime | pd.Timestamp) -> bool:
+    """True if the interval ``[start, end]`` contains any weekly closed window.
+
+    Used to flag trades held across the weekend closure
+    [Fri 17:00 NY, Sun 17:00 NY). Endpoints exactly touching a boundary count
+    as crossing only if the closed period lies strictly inside the span.
+    """
+    t0 = ensure_utc(start)
+    t1 = ensure_utc(end)
+    if t1 <= t0:
+        return False
+    for c0, c1 in closed_windows_around(t0 + (t1 - t0) / 2):
+        if t0 < c1 and t1 > c0:
+            return True
+    return False
+
+
+def session_of(ts: datetime | pd.Timestamp) -> str:
+    """Trading-session tag by UTC hour of ``ts`` (documented approximation).
+
+    ASIA [0, 7), LONDON [7, 12), OVERLAP [12, 17), NEWYORK [17, 22),
+    CLOSED otherwise (the weekend-closure hours where no fill should occur).
+    DST shifts are ignored at this coarse granularity on purpose.
+    """
+    t = ensure_utc(ts)
+    h = t.hour
+    if 0 <= h < 7:
+        return "ASIA"
+    if 7 <= h < 12:
+        return "LONDON"
+    if 12 <= h < 17:
+        return "OVERLAP"
+    if 17 <= h < 22:
+        return "NEWYORK"
+    return "CLOSED"

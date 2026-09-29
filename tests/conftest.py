@@ -1,9 +1,16 @@
-"""Shared test fixtures: build standard-schema candle frames."""
+"""Shared test fixtures: build standard-schema candle frames.
+
+Also installs a pytest ``caplog`` default: FXB modules use per-module loggers
+without propagate=False, so tests that assert on WARNING text need the root
+handler enabled at WARNING level by default (individual tests may override).
+"""
 from __future__ import annotations
 
+import logging
 from typing import Iterable, List, Optional
 
 import pandas as pd
+import pytest
 
 COLUMNS = ["ts_open", "open", "high", "low", "close", "tick_volume", "spread"]
 
@@ -28,3 +35,9 @@ def grid(tf_minutes: int, start: str, n: int) -> List[pd.Timestamp]:
     """``n`` consecutive bar opens ``tf_minutes`` apart starting at ``start`` (UTC)."""
     s = pd.Timestamp(start, tz="UTC")
     return [s + pd.Timedelta(minutes=tf_minutes * i) for i in range(n)]
+
+
+@pytest.fixture(autouse=True)
+def _root_caplog_level(caplog):
+    """Default caplog capture level: WARNING (tests can request lower)."""
+    caplog.set_level(logging.WARNING)
