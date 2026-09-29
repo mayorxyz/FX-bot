@@ -13,4 +13,20 @@ Candle schema (standard frames): tz-aware UTC DatetimeIndex ``ts_open``
 (bar OPEN time), columns ``open, high, low, close`` (bid prices),
 ``tick_volume``, ``spread`` (points). Spot forex has NO real volume: never
 use CVD/delta/order-flow concepts.
+
+Modules: basic (ATR/ADX/ER/ATR-pct/displacement), structure (swings/BOS/CHoCH),
+fvg (fair value gaps + state), order_blocks, liquidity (session ranges,
+prior-day levels, EQH/EQL, sweeps), regime, sessions (NY killzones),
+premium_discount.
 """
+
+from fxb.indicators import (  # noqa: F401
+    basic,
+    fvg,
+    liquidity,
+    order_blocks,
+    premium_discount,
+    regime,
+    sessions,
+    structure,
+)

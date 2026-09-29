@@ -139,15 +139,14 @@ def fvg_state(df: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame:
     for _, r in events.iterrows():
         created_by_bar.setdefault(int(r["created_idx"]), []).append(r)
 
-    live: list[dict] = []      # dicts with id/dir/top/bottom
+    live: list[dict] = []      # dicts with id/dir/top/bottom/mitigated/filled
     mit_count = 0
     fill_count = 0
-    filled_ids = set()
     for t in range(m):
         for r in created_by_bar.get(t, []):
-            live.append({"id": int(r.name) if isinstance(r.name, int) else None,
-                         "dir": int(r["direction"]), "top": float(r["top"]),
-                         "bottom": float(r["bottom"])})
+            live.append({"id": int(r.name), "dir": int(r["direction"]),
+                         "top": float(r["top"]), "bottom": float(r["bottom"]),
+                         "mitigated": False, "filled": False, "ci": t})
         still_live = []
         for g in live:
             if g["dir"] == 1:
@@ -156,19 +155,16 @@ def fvg_state(df: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame:
             else:
                 touched = h[t] >= g["bottom"]
                 filled = c[t] >= g["top"]
-            if touched and g["id"] not in filled_ids:
-                mit_count += 1
-                if filled:
-                    filled_ids.add(g["id"])
+            # mitigation/fill only count on bars STRICTLY after creation
+            if t > g["ci"]:
+                if touched and not g["mitigated"]:
+                    g["mitigated"] = True
+                    mit_count += 1
+                if filled and not g["filled"]:
+                    g["filled"] = True
                     fill_count += 1
+            if g["mitigated"]:
                 continue  # mitigated -> no longer active
-            if filled and g["id"] not in filled_ids:
-                # close crossed the far edge without a recorded touch is
-                # impossible (fill implies touch); defensive branch anyway
-                mit_count += 1
-                filled_ids.add(g["id"])
-                fill_count += 1
-                continue
             still_live.append(g)
         live = still_live
         n_active[t] = len(live)

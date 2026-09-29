@@ -1,11 +1,7 @@
-# Compiled and build artifacts
+# Python compiled files
 __pycache__/
-*.pyc
-
-# Logs and temp files
-*.lognode_modules/
+*.pycnode_modules/
 .next/
 dist/
 build/
 *.log
-node_modules/

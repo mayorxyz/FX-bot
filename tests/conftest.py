@@ -41,3 +41,22 @@ def grid(tf_minutes: int, start: str, n: int) -> List[pd.Timestamp]:
 def _root_caplog_level(caplog):
     """Default caplog capture level: WARNING (tests can request lower)."""
     caplog.set_level(logging.WARNING)
+
+# Make the tests directory importable as a package (``import helpers``) so
+# test modules can share builders without duplicating them.
+import os as _os
+import sys as _sys
+
+_TESTS_DIR = _os.path.dirname(_os.path.abspath(__file__))
+if _TESTS_DIR not in _sys.path:
+    _sys.path.insert(0, _TESTS_DIR)
+
+from helpers import (  # noqa: E402,F401
+    candles_from_ohlc,
+    synth_gapped,
+    synth_mixed,
+    synth_range,
+    synth_series,
+    synth_trend,
+    truncation_cut_points,
+)
