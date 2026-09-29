@@ -12,9 +12,15 @@ Rules (global):
     * D1 anchored to a wall-clock time in a tz database zone, e.g. the default
       ``"17:00 America/New_York"`` — buckets run from one NY-17:00 to the next,
       so the UTC boundary shifts automatically across DST changes.
+- ``allow_missing_frac`` (default 0.0 = strict): a bucket is emitted when at
+  most ``allow_missing_frac`` of its expected LTF bars are missing; with the
+  default any missing bar blocks emission and a WARNING is logged with the
+  window start and the missing-bar count. Buckets with ZERO expected bars
+  (fully weekend-closed windows) are skipped silently.
 """
 from __future__ import annotations
 
+import logging
 import re
 from datetime import timedelta
 from typing import Dict, List, Optional, Tuple
@@ -25,6 +31,8 @@ import pandas as pd
 from fxb.core.config import load_settings
 from fxb.core.timeutil import ensure_utc, expected_bar_times, timeframe_to_timedelta
 from fxb.data.validate import CANDLE_COLUMNS, validate_candles
+
+log = logging.getLogger(__name__)
 
 _ANCHOR_RE = re.compile(r"^(\d{1,2}):(\d{2})\s+(.+)$")
 
@@ -110,7 +118,8 @@ def _bucket_opens_zone(start: pd.Timestamp, end: pd.Timestamp,
 
 
 def resample_ohlc(df_lower: pd.DataFrame, target_tf: str,
-                  anchor: Optional[str] = None) -> pd.DataFrame:
+                  anchor: Optional[str] = None,
+                  allow_missing_frac: float = 0.0) -> pd.DataFrame:
     """Resample closed LTF candles (standard schema) into closed HTF candles.
 
     ``target_tf`` supports M5/M15/M30/H1/H4/D1. Incomplete buckets (any
@@ -122,7 +131,15 @@ def resample_ohlc(df_lower: pd.DataFrame, target_tf: str,
     hour-aligned grid (H4 at 00/04/...); D1 defaults to the configured
     ``D1_ANCHOR`` (default "17:00 America/New_York", DST-aware). A fixed-UTC
     daily grid can be requested with e.g. ``anchor="20 UTC"``.
+
+    ``allow_missing_frac`` (default 0.0, strict): maximum fraction of a
+    bucket's EXPECTED LTF bars that may be missing while still emitting the
+    bucket. With the default, any missing bar blocks emission and a WARNING
+    naming the window start and the missing count is logged. Buckets with no
+    expected bars at all (fully weekend-closed windows) are skipped silently.
     """
+    if not 0.0 <= allow_missing_frac < 1.0:
+        raise ValueError("allow_missing_frac must be in [0.0, 1.0)")
     validate_candles(df_lower)
     if len(df_lower) == 0:
         empty = pd.DataFrame({c: pd.Series(dtype="float64") for c in CANDLE_COLUMNS})
@@ -157,11 +174,22 @@ def resample_ohlc(df_lower: pd.DataFrame, target_tf: str,
             continue
         # Completeness: every EXPECTED LTF bar in this bucket must be present.
         # expected_bar_times only yields bars that fully fit inside the
-        # window, so weekend-closed periods never make a bucket "incomplete".
+        # window and excludes weekend-closed periods, so a fully closed
+        # window (zero expected bars) is skipped silently below.
         expected = [t for t in expected_bar_times_from(src_step, b_open, b_close)
                     if t >= b_open and t + src_step <= b_close]
-        have = set(pd.DatetimeIndex(pd.to_datetime(sub["ts_open"])).tz_convert("UTC"))
-        if any(t not in have for t in expected):
+        n_expected = len(expected)
+        if n_expected == 0:
+            continue  # market-closed window: not expected, skip silently
+        have = set(ts_all[mask])
+        missing = [t for t in expected if t not in have]
+        frac_missing = len(missing) / n_expected
+        if frac_missing > allow_missing_frac:
+            log.warning(
+                "resample %s->%s: incomplete HTF window starting %s "
+                "(%d of %d expected LTF bars missing); not emitted",
+                str(src_step), tgt, b_open.isoformat(), len(missing), n_expected,
+            )
             continue  # partial bucket -> never emitted
         rows.append({
             "ts_open": b_open,

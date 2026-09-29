@@ -1,0 +1,1 @@
+"""FXB signal contract."""

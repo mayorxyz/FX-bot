@@ -117,9 +117,14 @@ class Mt5Provider(DataProvider):
         if key not in _TF_ATTR:
             raise ValueError(f"unsupported timeframe {tf!r}")
         tf_const = getattr(mt5, _TF_ATTR[key])
-        rates = mt5.copy_rates_range(symbol.upper(), tf_const,
-                                     ensure_utc(start_utc).to_pydatetime(),
-                                     ensure_utc(end_utc).to_pydatetime())
+        # MT5 stamps bars with *server-time* values encoded as epoch seconds.
+        # Request a range padded by 1 day on each side so that, after the
+        # server->UTC shift below, the full [start, end) span is covered even
+        # for extreme offsets.
+        pad = pd.Timedelta(days=1)
+        req_start = (ensure_utc(start_utc) - pad).to_pydatetime()
+        req_end = (ensure_utc(end_utc) + pad).to_pydatetime()
+        rates = mt5.copy_rates_range(symbol.upper(), tf_const, req_start, req_end)
         if rates is None:
             raise RuntimeError(f"copy_rates_range failed for {symbol} {tf}: {mt5.last_error()}")
         if len(rates) == 0:
@@ -128,6 +133,7 @@ class Mt5Provider(DataProvider):
             return empty[CANDLE_COLUMNS]
 
         df = pd.DataFrame([dict(r) for r in rates])
+        # Server time = UTC + offset  =>  true_utc = stamp - offset.
         offset = pd.Timedelta(hours=float(self.settings.mt5_server_utc_offset_hours))
         naive = pd.to_datetime(df["time"], unit="s", utc=True)
         df["ts_open"] = (naive - offset).tz_convert("UTC")
@@ -139,6 +145,10 @@ class Mt5Provider(DataProvider):
         df["tick_volume"] = pd.to_numeric(df["tick_volume"]).astype("int64")
         df["spread"] = pd.to_numeric(df["spread"]).astype(float)
         df = df[CANDLE_COLUMNS].sort_values("ts_open").reset_index(drop=True)
+
+        # Filter to the requested window after the correction.
+        start_ts, end_ts = ensure_utc(start_utc), ensure_utc(end_utc)
+        df = df[(df["ts_open"] >= start_ts) & (df["ts_open"] < end_ts)].reset_index(drop=True)
 
         # Drop the still-forming bar: closed iff now >= ts_open + duration.
         now = pd.Timestamp.now(tz="UTC")
