@@ -38,60 +38,76 @@ MARKET_OPEN_SUNDAY_UTC_HOUR = MARKET_OPEN_SUNDAY_NY_HOUR
 
 
 def _to_utc(ny_ts: pd.Timestamp) -> pd.Timestamp:
-    """Convert a New-York wall-clock Timestamp to UTC (DST-correct)."""
-    aware = ny_ts.tz_localize(
-        _MARKET_TZ, nonexistent="shift_forward", ambiguous=False
-    )
-    return aware.tz_convert("UTC")
+    """Convert a New-York wall-clock Timestamp to UTC (DST-correct).
+
+    ``ny_ts`` may be naive (interpreted as New York wall-clock time) or
+    already carry the New York zone (as produced by :meth:`tz_convert`); in
+    that case it is converted directly. Localizing an already-aware stamp is
+    impossible, so the two cases must be handled separately.
+    """
+    ts = pd.Timestamp(ny_ts)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize(_MARKET_TZ, nonexistent="shift_forward", ambiguous=False)
+    elif str(ts.tzinfo) != MARKET_TZ_NAME:
+        raise ValueError(f"expected New York wall-clock timestamp, got tz {ts.tzinfo!r}")
+    return ts.tz_convert("UTC")
 
 
-def _week_closed_window(ref: pd.Timestamp) -> tuple[pd.Timestamp, pd.Timestamp]:
-    """The weekly closed window [c0, c1) of ``ref``'s NY trading week (UTC pair).
+def _week_closed_window(ref: pd.Timestamp) -> List[tuple[pd.Timestamp, pd.Timestamp]]:
+    """Candidate weekly closed windows [c0, c1) (UTC pairs) for ``ref``'s week.
 
     Windows run Friday 17:00 -> Sunday 17:00 *New York wall-clock time*;
     converting those instants to UTC honors DST automatically (winter
     closure = Fri 22:00Z .. Sun 22:00Z; summer = Fri 21:00Z .. Sun 21:00Z).
 
     The anchor is the most recent Friday **in New York local date terms** at
-    or before ``ref``, EXCEPT for early-Sunday UTC instants that are still
-    Saturday in New York (e.g. winter Sun 00:30Z = Sat 19:30 NY): there the
-    PREVIOUS Friday's window is returned because it is the closure still in
-    effect at that instant. :func:`closed_windows_around` additionally probes
-    adjacent weeks so every containment/overlap case is covered.
+    or before ``ref``. Because a UTC instant can sit in a different weekday
+    than its New York counterpart around the Sunday reopen (e.g. winter
+    Sun 00:30Z = Sat 19:30 NY — still inside the PREVIOUS Friday's closure),
+    the window anchored on the current local Friday AND the one anchored on
+    the previous Friday are both returned whenever the two UTC/NY weekday
+    readings disagree around that boundary. Callers treat the result as a
+    candidate set: an instant is "closed" iff it lies inside ANY of them.
     """
     ts = ensure_utc(ref)
     local = ts.tz_convert(_MARKET_TZ)
     days_since_fri = (local.dayofweek - 4) % 7   # Mon..Sun -> 4,5,6,0,1,2,3
     fri = local.normalize() - pd.Timedelta(days=int(days_since_fri))
-    if days_since_fri == 2 and ts.weekday() == 6:
-        # NY says Saturday but UTC already flipped to Sunday: we are inside
-        # the closure that started on the PREVIOUS Friday.
-        fri = fri - pd.Timedelta(days=7)
-    c0 = _to_utc(fri.replace(hour=MARKET_CLOSE_FRIDAY_NY_HOUR))
-    c1 = _to_utc((fri + pd.Timedelta(days=2)).replace(hour=MARKET_OPEN_SUNDAY_NY_HOUR))
-    return c0, c1
+    anchors = [fri]
+    if int(local.dayofweek) != (int(ts.dayofweek) - int(days_since_fri)) % 7:
+        # UTC and New York disagree about which calendar day we are in (the
+        # only way that happens is near midnight/weekend boundaries): the
+        # closure anchored on the PREVIOUS local Friday may still be in
+        # effect (e.g. winter Sun 00:30Z = Sat 19:30 NY). Include it too.
+        anchors.append(fri - pd.Timedelta(days=7))
+    out: List[tuple[pd.Timestamp, pd.Timestamp]] = []
+    for f in anchors:
+        c0 = _to_utc(f.replace(hour=MARKET_CLOSE_FRIDAY_NY_HOUR))
+        c1 = _to_utc((f + pd.Timedelta(days=2)).replace(hour=MARKET_OPEN_SUNDAY_NY_HOUR))
+        out.append((c0, c1))
+    return out
 
 
 def closed_windows_around(ref: pd.Timestamp) -> List[tuple[pd.Timestamp, pd.Timestamp]]:
     """Candidate weekly closed windows that could contain/intersect ``ref``.
 
-    Returns up to three distinct [Fri 17:00 NY, Sun 17:00 NY) windows as UTC
-    ``(c0, c1)`` pairs: the window of ``ref``'s NY trading week plus the
-    windows found by probing one week earlier and one week later. This
-    covers every boundary case: Friday evening, Saturday, and Sunday morning
-    before the reopen under either UTC-day alignment (e.g. winter Sun 00:30Z
-    belongs to the *previous* local week's window while Sun 23:00Z reopens
-    the new one).
+    Returns the distinct [Fri 17:00 NY, Sun 17:00 NY) windows (as UTC
+    ``(c0, c1)`` pairs) found by probing ``ref`` and ref ± one week; each
+    probe may itself yield two candidate anchors around the Sunday/DST
+    boundary (see :func:`_week_closed_window`). This covers every boundary
+    case: Friday evening, Saturday, and Sunday morning before the reopen
+    under either UTC-day alignment (e.g. winter Sun 00:30Z belongs to the
+    *previous* local week's window while Sun 23:00Z reopens the new one).
     """
     ts = ensure_utc(ref)
     out: List[tuple[pd.Timestamp, pd.Timestamp]] = []
     seen: set[tuple[float, float]] = set()
     for shift_days in (0, -7, 7):
-        c0, c1 = _week_closed_window(ts - pd.Timedelta(days=int(shift_days)))
-        key = (float(c0.timestamp()), float(c1.timestamp()))
-        if key not in seen:
-            seen.add(key)
-            out.append((c0, c1))
+        for c0, c1 in _week_closed_window(ts + pd.Timedelta(days=int(shift_days))):
+            key = (float(c0.timestamp()), float(c1.timestamp()))
+            if key not in seen:
+                seen.add(key)
+                out.append((c0, c1))
     return out
 
 
